@@ -272,11 +272,18 @@ export class SatQueryApiService {
     }
   ];
 
+  private static cachedSamples: BackendSample[] | null = null;
+
   /**
    * Fetch pre-bundled sample datasets with pre-generated previews.
    * Gracefully falls back to bundled static sample metadata if Render is offline or cold-starting.
+   * Caches results in memory to avoid duplicate network calls on view switches.
    */
-  static async getSamples(): Promise<BackendSample[]> {
+  static async getSamples(forceRefresh = false): Promise<BackendSample[]> {
+    if (!forceRefresh && this.cachedSamples && this.cachedSamples.length > 0) {
+      return this.cachedSamples;
+    }
+
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -290,11 +297,13 @@ export class SatQueryApiService {
       if (!data.samples || data.samples.length === 0) {
         return this.FALLBACK_SAMPLES;
       }
-      return data.samples.map((s: BackendSample) => ({
+      const mapped = data.samples.map((s: BackendSample) => ({
         ...s,
         preview_url: s.preview_url ? this.getFullUrl(s.preview_url) : undefined,
         url: this.getFullUrl(s.url),
       }));
+      this.cachedSamples = mapped;
+      return mapped;
     } catch {
       return this.FALLBACK_SAMPLES;
     }
@@ -399,17 +408,36 @@ export class SatQueryApiService {
       }
     };
 
-    let res = await executeFetch();
+    let res: Response | null = null;
+    let attempts = 0;
+    const maxAttempts = 3;
 
-    // If Render backend is waking up from sleep (503), retry once after a short delay
-    if (res.status === 503) {
-      await new Promise(r => setTimeout(r, 4000));
+    while (attempts < maxAttempts) {
+      attempts++;
       res = await executeFetch();
+
+      // If Render backend is waking up from sleep or recycling worker (502, 503, 504), retry with backoff
+      if (res.status === 502 || res.status === 503 || res.status === 504) {
+        if (attempts < maxAttempts) {
+          await new Promise(r => setTimeout(r, attempts * 3500));
+          continue;
+        }
+      }
+      break;
     }
 
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => null);
-      const errMsg = errJson?.error || `Analysis failed with HTTP ${res.status}: ${res.statusText}`;
+    if (!res || !res.ok) {
+      const status = res?.status || 500;
+      const statusText = res?.statusText || 'Error';
+      const errJson = await res?.json().catch(() => null);
+
+      if (status === 502 || status === 503 || status === 504) {
+        throw new Error(
+          `The cloud AI engine is currently spinning up from sleep mode on Render Free Tier (~45s cold start). Please wait a moment and click "Execute Reasoning" again.`
+        );
+      }
+
+      const errMsg = errJson?.error || `Analysis failed with HTTP ${status}: ${statusText}`;
       throw new Error(errMsg);
     }
 

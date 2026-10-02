@@ -259,12 +259,25 @@ class CrossModalSpecialist:
         """
         # Formulate unified 14-channel array
         fused_14ch = self._fuse_inputs(optical_geotiff, sar_geotiff)
-        _, height, width = fused_14ch.shape
+        _, orig_height, orig_width = fused_14ch.shape
 
-        if max(height, width) > 1024:
-            stride = tile_size
+        MAX_INFER_DIM = 512
+        needs_downsample = max(orig_height, orig_width) > MAX_INFER_DIM
+
+        if needs_downsample:
+            scale = MAX_INFER_DIM / max(orig_height, orig_width)
+            infer_h = int(round(orig_height * scale))
+            infer_w = int(round(orig_width * scale))
+            t_fused = torch.nn.functional.interpolate(
+                torch.from_numpy(fused_14ch).unsqueeze(0), size=(infer_h, infer_w), mode="bilinear", align_corners=False
+            ).squeeze(0).numpy()
+            height, width = infer_h, infer_w
+            eval_fused = t_fused
         else:
-            stride = max(tile_size - tile_overlap, 64)
+            height, width = orig_height, orig_width
+            eval_fused = fused_14ch
+
+        stride = tile_size if max(height, width) >= 512 else max(tile_size - tile_overlap, 64)
         accum_logits = np.zeros((self.num_classes, height, width), dtype=np.float32)
         count_map = np.zeros((height, width), dtype=np.float32)
 
@@ -277,7 +290,7 @@ class CrossModalSpecialist:
                     c_end = min(c + tile_size, width)
                     c_start = max(0, c_end - tile_size)
 
-                    tile = fused_14ch[:, r_start:r_end, c_start:c_end]
+                    tile = eval_fused[:, r_start:r_end, c_start:c_end]
                     tensor = torch.from_numpy(tile).unsqueeze(0).to(self.device)
 
                     logits = self.model(tensor).squeeze(0).cpu().numpy()
@@ -286,7 +299,14 @@ class CrossModalSpecialist:
 
         count_map = np.maximum(count_map, 1.0)
         accum_logits /= count_map
-        probs = torch.softmax(torch.from_numpy(accum_logits), dim=0).numpy()
+        probs_infer = torch.softmax(torch.from_numpy(accum_logits), dim=0)
+
+        if needs_downsample:
+            probs = torch.nn.functional.interpolate(
+                probs_infer.unsqueeze(0), size=(orig_height, orig_width), mode="bilinear", align_corners=False
+            ).squeeze(0).numpy()
+        else:
+            probs = probs_infer.numpy()
 
         # Resolve target class index
         target_idx = 1  # Default to clean_water

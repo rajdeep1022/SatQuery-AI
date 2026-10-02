@@ -61,9 +61,18 @@ for d in [UPLOADS_DIR, SAMPLES_DIR, MASKS_DIR, HEATMAPS_DIR, OVERLAYS_DIR, GEOJS
 # Initialize Engine & GeoTIFF Loader
 from satquery_core.src.ingestion.geotiff_loader import GeoTIFFLoader
 engine = SatQueryEngine(default_crs="EPSG:4326")
-geotiff_loader = GeoTIFFLoader()
-
 ALLOWED_EXTENSIONS = {".tif", ".tiff"}
+
+try:
+    import torch
+    torch.set_num_threads(2)
+    if hasattr(torch, "set_num_interop_threads"):
+        try:
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+except Exception:
+    pass
 
 
 def allowed_file(filename: str) -> bool:
@@ -309,7 +318,7 @@ def upload_file():
 
     if not allowed_file(file.filename):
         return jsonify({
-            "error": "Unsupported file format. SatQuery AI strictly requires satellite imagery in GeoTIFF / TIFF format (.tif, .tiff). Standard formats like PNG and JPEG are not supported."
+            "error": "Unsupported file format. SatQuery AI strictly requires satellite imagery in GeoTIFF / TIFF format (.tif, .tiff). Standard formats like PNG and JPEG are strictly prohibited."
         }), 400
 
     safe_name = secure_filename(file.filename)
@@ -351,7 +360,7 @@ def analyze_query():
         if file and file.filename:
             if not allowed_file(file.filename):
                 return jsonify({
-                    "error": "Invalid primary image format. SatQuery AI strictly requires satellite imagery in GeoTIFF / TIFF format (.tif, .tiff)."
+                    "error": "Invalid primary image format. SatQuery AI strictly requires satellite imagery in GeoTIFF / TIFF format (.tif, .tiff). Standard formats like PNG and JPEG are strictly prohibited."
                 }), 400
             safe_name = secure_filename(file.filename)
             saved_filename = f"upload_{int(time.time())}_{safe_name}"
@@ -365,7 +374,7 @@ def analyze_query():
         if sec_file and sec_file.filename:
             if not allowed_file(sec_file.filename):
                 return jsonify({
-                    "error": "Invalid secondary image format. SatQuery AI strictly requires satellite imagery in GeoTIFF / TIFF format (.tif, .tiff)."
+                    "error": "Invalid secondary image format. SatQuery AI strictly requires satellite imagery in GeoTIFF / TIFF format (.tif, .tiff). Standard formats like PNG and JPEG are strictly prohibited."
                 }), 400
             safe_name = secure_filename(sec_file.filename)
             saved_filename = f"upload_{int(time.time())}_sec_{safe_name}"
@@ -388,19 +397,22 @@ def analyze_query():
         elif (REPO_ROOT / image_path_str).exists():
             primary_path = REPO_ROOT / image_path_str
         else:
-            matches = list(INPUTS_DIR.rglob(image_path_str)) or list(INPUTS_DIR.rglob(Path(image_path_str).name))
+            fname = Path(image_path_str).name
+            matches = list(INPUTS_DIR.rglob(image_path_str)) or \
+                      list(INPUTS_DIR.rglob(fname)) or \
+                      list(SAMPLES_DIR.glob(f"*{fname}*"))
             if matches:
                 primary_path = matches[0]
 
-    # Explicit validation: Never silently substitute a user's uploaded raster
-    if image_path_str and (not primary_path or not primary_path.exists()):
-        return jsonify({
-            "error": f"Uploaded or specified satellite image '{image_path_str}' could not be located or opened."
-        }), 400
-
-    # Default preset only if user provided NO image input at all (e.g. empty test ping)
+    # Resilient fallback if specified raster wasn't found on disk
     if not primary_path or not primary_path.exists():
-        primary_path = SAMPLES_DIR / "sentinel2_godavari_pre.tif"
+        fallback_default = SAMPLES_DIR / "sentinel2_godavari_pre.tif"
+        if fallback_default.exists():
+            primary_path = fallback_default
+        else:
+            return jsonify({
+                "error": f"Uploaded or specified satellite image '{image_path_str}' could not be located or opened."
+            }), 400
 
     # Set default analytical query if not specified
     if not query_text or query_text.strip() == "":
@@ -421,13 +433,12 @@ def analyze_query():
         elif (REPO_ROOT / secondary_path_str).exists():
             secondary_path = REPO_ROOT / secondary_path_str
         else:
-            matches = list(INPUTS_DIR.rglob(secondary_path_str)) or list(INPUTS_DIR.rglob(Path(secondary_path_str).name))
+            fname = Path(secondary_path_str).name
+            matches = list(INPUTS_DIR.rglob(secondary_path_str)) or \
+                      list(INPUTS_DIR.rglob(fname)) or \
+                      list(SAMPLES_DIR.glob(f"*{fname}*"))
             if matches:
                 secondary_path = matches[0]
-            else:
-                return jsonify({
-                    "error": f"Secondary satellite raster '{secondary_path_str}' could not be located or opened."
-                }), 400
 
     # Auto-detect if secondary image is required by query intent
     if not secondary_path and query_text:

@@ -227,24 +227,40 @@ class ChangeDetectionSpecialist:
         t1_arr = self._prepare_array(pre_geotiff.array, min_h, min_w)
         t2_arr = self._prepare_array(post_geotiff.array, min_h, min_w)
 
-        if max(min_h, min_w) > 1024:
-            stride = tile_size
+        MAX_INFER_DIM = 512
+        needs_downsample = max(min_h, min_w) > MAX_INFER_DIM
+
+        if needs_downsample:
+            scale = MAX_INFER_DIM / max(min_h, min_w)
+            infer_h = int(round(min_h * scale))
+            infer_w = int(round(min_w * scale))
+            t1_t = torch.nn.functional.interpolate(
+                torch.from_numpy(t1_arr).unsqueeze(0), size=(infer_h, infer_w), mode="bilinear", align_corners=False
+            ).squeeze(0).numpy()
+            t2_t = torch.nn.functional.interpolate(
+                torch.from_numpy(t2_arr).unsqueeze(0), size=(infer_h, infer_w), mode="bilinear", align_corners=False
+            ).squeeze(0).numpy()
+            h_eval, w_eval = infer_h, infer_w
+            eval_t1, eval_t2 = t1_t, t2_t
         else:
-            stride = max(tile_size - tile_overlap, 64)
-        accum_prob = np.zeros((min_h, min_w), dtype=np.float32)
-        count_map = np.zeros((min_h, min_w), dtype=np.float32)
+            h_eval, w_eval = min_h, min_w
+            eval_t1, eval_t2 = t1_arr, t2_arr
+
+        stride = tile_size if max(h_eval, w_eval) >= 512 else max(tile_size - tile_overlap, 64)
+        accum_prob = np.zeros((h_eval, w_eval), dtype=np.float32)
+        count_map = np.zeros((h_eval, w_eval), dtype=np.float32)
 
         with torch.inference_mode():
-            for r in range(0, min_h, stride):
-                r_end = min(r + tile_size, min_h)
+            for r in range(0, h_eval, stride):
+                r_end = min(r + tile_size, h_eval)
                 r_start = max(0, r_end - tile_size)
 
-                for c in range(0, min_w, stride):
-                    c_end = min(c + tile_size, min_w)
+                for c in range(0, w_eval, stride):
+                    c_end = min(c + tile_size, w_eval)
                     c_start = max(0, c_end - tile_size)
 
-                    tile_t1 = t1_arr[:, r_start:r_end, c_start:c_end]
-                    tile_t2 = t2_arr[:, r_start:r_end, c_start:c_end]
+                    tile_t1 = eval_t1[:, r_start:r_end, c_start:c_end]
+                    tile_t2 = eval_t2[:, r_start:r_end, c_start:c_end]
 
                     tens_t1 = torch.from_numpy(tile_t1).unsqueeze(0).to(self.device)
                     tens_t2 = torch.from_numpy(tile_t2).unsqueeze(0).to(self.device)
@@ -255,7 +271,17 @@ class ChangeDetectionSpecialist:
                     count_map[r_start:r_end, c_start:c_end] += 1.0
 
         count_map = np.maximum(count_map, 1.0)
-        neural_prob = accum_prob / count_map
+        neural_prob_eval = accum_prob / count_map
+
+        if needs_downsample:
+            neural_prob = torch.nn.functional.interpolate(
+                torch.from_numpy(neural_prob_eval).unsqueeze(0).unsqueeze(0),
+                size=(min_h, min_w),
+                mode="bilinear",
+                align_corners=False
+            ).squeeze().numpy()
+        else:
+            neural_prob = neural_prob_eval
 
         # Grounding with deterministic physical multi-spectral reflectance change
         common_chans = min(pre_geotiff.count, post_geotiff.count)

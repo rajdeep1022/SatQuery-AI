@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState } from 'react';
 import { 
   UploadCloud, 
   FileCheck2, 
@@ -35,19 +35,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
   const [isDragOver, setIsDragOver] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
-  const [availableSamples, setAvailableSamples] = useState<any[]>([]);
-  const [showSamplePicker, setShowSamplePicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    SatQueryApiService.getSamples().then(samples => {
-      if (mounted && samples && samples.length > 0) {
-        setAvailableSamples(samples);
-      }
-    }).catch(() => {});
-    return () => { mounted = false; };
-  }, []);
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();

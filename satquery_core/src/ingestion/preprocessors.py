@@ -187,7 +187,7 @@ class SARPreprocessor:
 
         # Optional spatial speckle filtering in the linear intensity domain
         if self.filter_speckle and intensity.shape[-1] >= self.filter_window_size:
-            intensity = self._apply_boxcar_filter(intensity, self.filter_window_size)
+            intensity = self._apply_lee_filter(intensity, self.filter_window_size)
 
         # Apply logarithmic decibel transformation with numerical safety
         intensity_safe = np.maximum(intensity, self.epsilon)
@@ -217,6 +217,33 @@ class SARPreprocessor:
             Cross-ratio array in dB.
         """
         return (vh_db - vv_db).astype(np.float32)
+
+    def _apply_lee_filter(self, intensity: np.ndarray, size: int) -> np.ndarray:
+        """
+        Enhanced Lee speckle filter preserving edges (coastlines, dams, urban boundaries).
+        Formula:
+            w = max(0, 1 - (Cu^2 / Ci^2)), where Cu = 0.52 (4-look), Ci = std / mean
+            R_hat = mean + w * (intensity - mean)
+        """
+        def filter_channel(channel: np.ndarray) -> np.ndarray:
+            mean = uniform_filter(channel, size=size, mode="reflect")
+            sq_mean = uniform_filter(channel ** 2, size=size, mode="reflect")
+            variance = np.maximum(sq_mean - mean ** 2, 0.0)
+            
+            cu_sq = 0.27  # Noise coefficient of variation squared for multi-look SAR
+            ci_sq = variance / (mean ** 2 + 1e-6)
+            weights = np.maximum(0.0, 1.0 - (cu_sq / (ci_sq + 1e-6)))
+            weights = np.clip(weights, 0.0, 1.0)
+            return mean + weights * (channel - mean)
+
+        if intensity.ndim == 3:
+            filtered = np.empty_like(intensity)
+            for c in range(intensity.shape[0]):
+                filtered[c] = filter_channel(intensity[c])
+            return filtered
+        elif intensity.ndim == 2:
+            return filter_channel(intensity)
+        return intensity
 
     def _apply_boxcar_filter(self, intensity: np.ndarray, size: int) -> np.ndarray:
         """Apply uniform spatial averaging across spatial axes (H, W) per channel."""

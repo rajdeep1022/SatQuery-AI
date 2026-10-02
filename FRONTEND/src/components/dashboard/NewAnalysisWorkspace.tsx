@@ -227,11 +227,17 @@ export const NewAnalysisWorkspace: React.FC<NewAnalysisWorkspaceProps> = ({
       }
     } catch (err: any) {
       console.error('Analysis execution error:', err);
-      const is503 = (err?.message || '').includes('503') || (err?.message || '').toLowerCase().includes('cold start');
-      if (is503) {
-        setErrorMessage('The SatQuery AI engine is currently waking up from sleep on Render Free Tier (~50-90s cold start). Please click "Execute Reasoning" again in a few moments.');
+      const msg = err?.message || '';
+      const isColdStart = msg.includes('502') || 
+                          msg.includes('503') || 
+                          msg.includes('504') || 
+                          msg.toLowerCase().includes('cold start') ||
+                          msg.toLowerCase().includes('bad gateway') ||
+                          msg.toLowerCase().includes('spinning up');
+      if (isColdStart) {
+        setErrorMessage('The SatQuery AI cloud engine is currently waking up from sleep on Render Free Tier (~45s cold start). Please wait a moment and click "Execute Reasoning" again.');
       } else {
-        setErrorMessage(err?.message || 'Inference query encountered an error. Please verify the satellite raster format (.tif, .tiff) and retry.');
+        setErrorMessage(msg || 'Inference query encountered an error. Please verify the satellite raster format (.tif, .tiff) and retry.');
       }
     } finally {
       stepTimers.forEach(t => clearTimeout(t));

@@ -205,21 +205,34 @@ class SingleImageSpecialist:
                 - binary_mask: 2D boolean array where probability >= confidence_threshold.
                 - metadata: Quantitative summary dictionary.
         """
-        channels, height, width = geotiff.array.shape
+        channels, orig_height, orig_width = geotiff.array.shape
+        MAX_INFER_DIM = 512
+        needs_downsample = max(orig_height, orig_width) > MAX_INFER_DIM
 
         # Validate channel count or slice if necessary
         if channels < self.in_channels:
-            padded = np.zeros((self.in_channels, height, width), dtype=np.float32)
+            padded = np.zeros((self.in_channels, orig_height, orig_width), dtype=np.float32)
             padded[:channels] = geotiff.array
-            input_array = padded
+            full_input = padded
         else:
-            input_array = geotiff.array[:self.in_channels]
+            full_input = geotiff.array[:self.in_channels]
 
-        # Adaptive stride prevents exceeding Render's 100-second edge gateway timeout
-        if max(height, width) > 1024:
-            stride = tile_size
+        if needs_downsample:
+            scale = MAX_INFER_DIM / max(orig_height, orig_width)
+            infer_h = int(round(orig_height * scale))
+            infer_w = int(round(orig_width * scale))
+            t_in = torch.from_numpy(full_input).unsqueeze(0)
+            t_resized = torch.nn.functional.interpolate(
+                t_in, size=(infer_h, infer_w), mode="bilinear", align_corners=False
+            ).squeeze(0)
+            input_array = t_resized.numpy()
+            height, width = infer_h, infer_w
         else:
-            stride = max(tile_size - tile_overlap, 64)
+            input_array = full_input
+            height, width = orig_height, orig_width
+
+        # Adaptive stride prevents timeout & memory exhaustion on cloud instances
+        stride = tile_size if max(height, width) >= 512 else max(tile_size - tile_overlap, 64)
 
         accum_logits = np.zeros((self.num_classes, height, width), dtype=np.float32)
         count_map = np.zeros((height, width), dtype=np.float32)
@@ -246,7 +259,15 @@ class SingleImageSpecialist:
         accum_logits /= count_map
 
         # Softmax probabilities across classes
-        probs = torch.softmax(torch.from_numpy(accum_logits), dim=0).numpy()
+        probs_infer = torch.softmax(torch.from_numpy(accum_logits), dim=0)
+
+        # Restore to original spatial dimensions
+        if needs_downsample:
+            probs = torch.nn.functional.interpolate(
+                probs_infer.unsqueeze(0), size=(orig_height, orig_width), mode="bilinear", align_corners=False
+            ).squeeze(0).numpy()
+        else:
+            probs = probs_infer.numpy()
 
         # Compute empirical scene class distribution from spectral/radiometric bands
         class_distribution: Dict[str, float] = {}
